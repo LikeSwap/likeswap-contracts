@@ -1,6 +1,6 @@
 # LikeSwap
 
-https://likeswap.com/ Feel free to read the code. More details coming soon.
+https://likeswap.org/ Feel free to read the code. More details coming soon.
 
 ## Deployed Contracts / Hash
 
