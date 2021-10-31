@@ -1,22 +1,27 @@
+// SPDX-License-Identifier: GPL-3.0-or-later Or MIT
 pragma solidity 0.6.12;
+pragma experimental ABIEncoderV2;
 
 import "./LotteryNFT.sol";
-import "../libs/IBEP20.sol";
-import "../libs/SafeBEP20.sol";
-import "@openzeppelin/contracts/math/SafeMath.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "./LotteryOwnable.sol";
+import "./IERC20.sol";
+import "./SafeERC20.sol";
+import "./SafeMath.sol";
+import "./Initializable.sol";
+
+// import "@nomiclabs/buidler/console.sol";
 
 // 4 numbers
-contract Lottery is OwnableUpgradeable {
+contract Lottery is LotteryOwnable, Initializable {
     using SafeMath for uint256;
     using SafeMath for uint8;
-    using SafeBEP20 for IBEP20;
+    using SafeERC20 for IERC20;
 
-    uint8 constant winningCombinations = 11;
+    uint8 constant keyLengthForEachBuy = 11;
     // Allocation for first/sencond/third reward
     uint8[3] public allocation;
     // The TOKEN to buy lottery
-    IBEP20 public egg;
+    IERC20 public like;
     // The Lottery NFT for tickets
     LotteryNFT public lotteryNFT;
     // adminAddress
@@ -58,31 +63,26 @@ contract Lottery is OwnableUpgradeable {
     event Reset(uint256 indexed issueIndex);
     event MultiClaim(address indexed user, uint256 amount);
     event MultiBuy(address indexed user, uint256 amount);
-    event SetMinPrice(address indexed user, uint256 price);
-    event SetMaxNumber(address indexed user, uint256 number);
-    event SetAdmin(address indexed user, address indexed admin);
-    event SetAllocation(address indexed user, uint8 allocation1, uint8 allocation2, uint8 allocation3);
 
     constructor() public {
     }
 
     function initialize(
-        IBEP20 _egg,
+        IERC20 _like,
         LotteryNFT _lottery,
         uint256 _minPrice,
         uint8 _maxNumber,
+        address _owner,
         address _adminAddress
-    ) external initializer {
-        require(_adminAddress != address(0));
-
-        egg = _egg;
+    ) public initializer {
+        like = _like;
         lotteryNFT = _lottery;
         minPrice = _minPrice;
         maxNumber = _maxNumber;
         adminAddress = _adminAddress;
         lastTimestamp = block.timestamp;
         allocation = [60, 20, 10];
-        __Ownable_init();
+        initOwner(_owner);
     }
 
     uint8[4] private nullTicket = [0,0,0,0];
@@ -132,14 +132,14 @@ contract Lottery is OwnableUpgradeable {
         for (uint i = 0; i < 10; i++) {
             getTotalRewards(issueIndex);
         }
-        uint256 gasLeft = gasleft();
+        uint256 gasleft = gasleft();
 
         // 1
         _structHash = keccak256(
             abi.encode(
                 _blockhash,
                 totalAddresses,
-                gasLeft,
+                gasleft,
                 _externalRandomNumber
             )
         );
@@ -152,7 +152,7 @@ contract Lottery is OwnableUpgradeable {
             abi.encode(
                 _blockhash,
                 totalAmount,
-                gasLeft,
+                gasleft,
                 _externalRandomNumber
             )
         );
@@ -165,7 +165,7 @@ contract Lottery is OwnableUpgradeable {
             abi.encode(
                 _blockhash,
                 lastTimestamp,
-                gasLeft,
+                gasleft,
                 _externalRandomNumber
             )
         );
@@ -177,7 +177,7 @@ contract Lottery is OwnableUpgradeable {
         _structHash = keccak256(
             abi.encode(
                 _blockhash,
-                gasLeft,
+                gasleft,
                 _externalRandomNumber
             )
         );
@@ -203,9 +203,12 @@ contract Lottery is OwnableUpgradeable {
 
     }
 
-    function _buySingleTicket(uint256 _price, uint8[4] memory _numbers) private returns (uint256){
+    function buy(uint256 _price, uint8[4] memory _numbers) external {
+        require(!drawed(), 'drawed, can not buy now');
+        require(!drawingPhase, 'drawing, can not buy now');
+        require (_price >= minPrice, 'price must above minPrice');
         for (uint i = 0; i < 4; i++) {
-            require (_numbers[i] <= maxNumber, 'bad number');
+            require (_numbers[i] <= maxNumber, 'exceed number scope');
         }
         uint256 tokenId = lotteryNFT.newLotteryItem(msg.sender, _numbers, _price, issueIndex);
         lotteryInfo[issueIndex].push(tokenId);
@@ -215,31 +218,37 @@ contract Lottery is OwnableUpgradeable {
         userInfo[msg.sender].push(tokenId);
         totalAmount = totalAmount.add(_price);
         lastTimestamp = block.timestamp;
-        uint32[winningCombinations] memory userCombinations = generateCombinations(_numbers);
-        for (uint i = 0; i < winningCombinations; i++) {
-            userBuyAmountSum[issueIndex][userCombinations[i]]=userBuyAmountSum[issueIndex][userCombinations[i]].add(_price);
+        uint64[keyLengthForEachBuy] memory userNumberIndex = generateNumberIndexKey(_numbers);
+        for (uint i = 0; i < keyLengthForEachBuy; i++) {
+            userBuyAmountSum[issueIndex][userNumberIndex[i]]=userBuyAmountSum[issueIndex][userNumberIndex[i]].add(_price);
         }
-        return tokenId;
-    }
-
-    function buy(uint256 _price, uint8[4] memory _numbers) external {
-        require(!drawed(), 'drawed, can not buy now');
-        require(!drawingPhase, 'drawing, can not buy now');
-        require (_price >= minPrice, 'price must above minPrice');
-        uint256 tokenId = _buySingleTicket(_price, _numbers);
-        egg.safeTransferFrom(address(msg.sender), address(this), _price);
+        like.safeTransferFrom(address(msg.sender), address(this), _price);
         emit Buy(msg.sender, tokenId);
     }
 
-    function multiBuy(uint256 _price, uint8[4][] memory _numbers) external {
+    function  multiBuy(uint256 _price, uint8[4][] memory _numbers) external {
         require (!drawed(), 'drawed, can not buy now');
         require (_price >= minPrice, 'price must above minPrice');
         uint256 totalPrice  = 0;
         for (uint i = 0; i < _numbers.length; i++) {
-            _buySingleTicket(_price, _numbers[i]);
+            for (uint j = 0; j < 4; j++) {
+                require (_numbers[i][j] <= maxNumber && _numbers[i][j] > 0, 'exceed number scope');
+            }
+            uint256 tokenId = lotteryNFT.newLotteryItem(msg.sender, _numbers[i], _price, issueIndex);
+            lotteryInfo[issueIndex].push(tokenId);
+            if (userInfo[msg.sender].length == 0) {
+                totalAddresses = totalAddresses + 1;
+            }
+            userInfo[msg.sender].push(tokenId);
+            totalAmount = totalAmount.add(_price);
+            lastTimestamp = block.timestamp;
             totalPrice = totalPrice.add(_price);
+            uint64[keyLengthForEachBuy] memory numberIndexKey = generateNumberIndexKey(_numbers[i]);
+            for (uint k = 0; k < keyLengthForEachBuy; k++) {
+                userBuyAmountSum[issueIndex][numberIndexKey[k]]=userBuyAmountSum[issueIndex][numberIndexKey[k]].add(_price);
+            }
         }
-        egg.safeTransferFrom(address(msg.sender), address(this), totalPrice);
+        like.safeTransferFrom(address(msg.sender), address(this), totalPrice);
         emit MultiBuy(msg.sender, totalPrice);
     }
 
@@ -249,12 +258,12 @@ contract Lottery is OwnableUpgradeable {
         uint256 reward = getRewardView(_tokenId);
         lotteryNFT.claimReward(_tokenId);
         if(reward>0) {
-            safeEggTransfer(address(msg.sender), reward);
+            like.safeTransfer(address(msg.sender), reward);
         }
         emit Claim(msg.sender, _tokenId, reward);
     }
 
-    function multiClaim(uint256[] memory _tickets) external {
+    function  multiClaim(uint256[] memory _tickets) external {
         uint256 totalReward = 0;
         for (uint i = 0; i < _tickets.length; i++) {
             require (msg.sender == lotteryNFT.ownerOf(_tickets[i]), "not from owner");
@@ -266,61 +275,61 @@ contract Lottery is OwnableUpgradeable {
         }
         lotteryNFT.multiClaimReward(_tickets);
         if(totalReward>0) {
-            safeEggTransfer(address(msg.sender), totalReward);
+            like.safeTransfer(address(msg.sender), totalReward);
         }
         emit MultiClaim(msg.sender, totalReward);
     }
 
-    function generateCombinations(uint8[4] memory number) public pure returns (uint32[winningCombinations] memory) {
-        uint32 packedNumber = (number[0] << 24) + (number[1] << 16) + (number[2] << 8) + number[3];
+    function generateNumberIndexKey(uint8[4] memory number) public pure returns (uint64[keyLengthForEachBuy] memory) {
+        uint64[4] memory tempNumber;
+        tempNumber[0]=uint64(number[0]);
+        tempNumber[1]=uint64(number[1]);
+        tempNumber[2]=uint64(number[2]);
+        tempNumber[3]=uint64(number[3]);
 
-        uint32[winningCombinations] memory combinations;
+        uint64[keyLengthForEachBuy] memory result;
+        result[0] = tempNumber[0]*256*256*256*256*256*256 + 1*256*256*256*256*256 + tempNumber[1]*256*256*256*256 + 2*256*256*256 + tempNumber[2]*256*256 + 3*256 + tempNumber[3];
 
-        //Match 4
-        combinations[0] = packedNumber;
+        result[1] = tempNumber[0]*256*256*256*256 + 1*256*256*256 + tempNumber[1]*256*256 + 2*256+ tempNumber[2];
+        result[2] = tempNumber[0]*256*256*256*256 + 1*256*256*256 + tempNumber[1]*256*256 + 3*256+ tempNumber[3];
+        result[3] = tempNumber[0]*256*256*256*256 + 2*256*256*256 + tempNumber[2]*256*256 + 3*256 + tempNumber[3];
+        result[4] = 1*256*256*256*256*256 + tempNumber[1]*256*256*256*256 + 2*256*256*256 + tempNumber[2]*256*256 + 3*256 + tempNumber[3];
 
-        //Match 3
-        combinations[1] = packedNumber & 0x00FFFFFF;
-        combinations[2] = packedNumber & 0xFF00FFFF;
-        combinations[3] = packedNumber & 0xFFFF00FF;
-        combinations[4] = packedNumber & 0xFFFFFF00;
+        result[5] = tempNumber[0]*256*256 + 1*256+ tempNumber[1];
+        result[6] = tempNumber[0]*256*256 + 2*256+ tempNumber[2];
+        result[7] = tempNumber[0]*256*256 + 3*256+ tempNumber[3];
+        result[8] = 1*256*256*256 + tempNumber[1]*256*256 + 2*256 + tempNumber[2];
+        result[9] = 1*256*256*256 + tempNumber[1]*256*256 + 3*256 + tempNumber[3];
+        result[10] = 2*256*256*256 + tempNumber[2]*256*256 + 3*256 + tempNumber[3];
 
-        //Match 2
-        combinations[5] = packedNumber & 0x0000FFFF;
-        combinations[6] = packedNumber & 0x00FF00FF;
-        combinations[7] = packedNumber & 0x00FFFF00;
-        combinations[8] = packedNumber & 0xFF0000FF;
-        combinations[9] = packedNumber & 0xFF00FF00;
-        combinations[10] = packedNumber & 0xFFFF0000;
-
-        return combinations;
+        return result;
     }
 
     function calculateMatchingRewardAmount() internal view returns (uint256[4] memory) {
-        uint32[winningCombinations] memory combinations = generateCombinations(winningNumbers);
+        uint64[keyLengthForEachBuy] memory numberIndexKey = generateNumberIndexKey(winningNumbers);
 
-        uint256 totalMatched4 = userBuyAmountSum[issueIndex][combinations[0]];
+        uint256 totalAmout1 = userBuyAmountSum[issueIndex][numberIndexKey[0]];
 
-        uint256 totalMatched3 = userBuyAmountSum[issueIndex][combinations[1]];
-        totalMatched3 = totalMatched3.add(userBuyAmountSum[issueIndex][combinations[2]]);
-        totalMatched3 = totalMatched3.add(userBuyAmountSum[issueIndex][combinations[3]]);
-        totalMatched3 = totalMatched3.add(userBuyAmountSum[issueIndex][combinations[4]]);
-        totalMatched3 = totalMatched3.sub(totalMatched4.mul(4)); //Remove overlaps from Matched4 users
+        uint256 sumForTotalAmout2 = userBuyAmountSum[issueIndex][numberIndexKey[1]];
+        sumForTotalAmout2 = sumForTotalAmout2.add(userBuyAmountSum[issueIndex][numberIndexKey[2]]);
+        sumForTotalAmout2 = sumForTotalAmout2.add(userBuyAmountSum[issueIndex][numberIndexKey[3]]);
+        sumForTotalAmout2 = sumForTotalAmout2.add(userBuyAmountSum[issueIndex][numberIndexKey[4]]);
 
-        uint256 totalMatched2 = userBuyAmountSum[issueIndex][combinations[5]];
-        totalMatched2 = totalMatched2.add(userBuyAmountSum[issueIndex][combinations[6]]);
-        totalMatched2 = totalMatched2.add(userBuyAmountSum[issueIndex][combinations[7]]);
-        totalMatched2 = totalMatched2.add(userBuyAmountSum[issueIndex][combinations[8]]);
-        totalMatched2 = totalMatched2.add(userBuyAmountSum[issueIndex][combinations[9]]);
-        totalMatched2 = totalMatched2.add(userBuyAmountSum[issueIndex][combinations[10]]);
-        totalMatched2 = totalMatched2.sub(totalMatched3.mul(3)); //Remove overlaps from Matched3 users
-        totalMatched2 = totalMatched2.sub(totalMatched4.mul(6)); //Remove overlaps from Matched4 users
+        uint256 totalAmout2 = sumForTotalAmout2.sub(totalAmout1.mul(4));
 
-        return [totalAmount, totalMatched4, totalMatched3, totalMatched2];
+        uint256 sumForTotalAmout3 = userBuyAmountSum[issueIndex][numberIndexKey[5]];
+        sumForTotalAmout3 = sumForTotalAmout3.add(userBuyAmountSum[issueIndex][numberIndexKey[6]]);
+        sumForTotalAmout3 = sumForTotalAmout3.add(userBuyAmountSum[issueIndex][numberIndexKey[7]]);
+        sumForTotalAmout3 = sumForTotalAmout3.add(userBuyAmountSum[issueIndex][numberIndexKey[8]]);
+        sumForTotalAmout3 = sumForTotalAmout3.add(userBuyAmountSum[issueIndex][numberIndexKey[9]]);
+        sumForTotalAmout3 = sumForTotalAmout3.add(userBuyAmountSum[issueIndex][numberIndexKey[10]]);
+
+        uint256 totalAmout3 = sumForTotalAmout3.add(totalAmout1.mul(6)).sub(sumForTotalAmout2.mul(3));
+
+        return [totalAmount, totalAmout1, totalAmout2, totalAmout3];
     }
 
     function getMatchingRewardAmount(uint256 _issueIndex, uint256 _matchingNumber) public view returns (uint256) {
-        require(_matchingNumber >= 2 && _matchingNumber <= 4, "getMatchingRewardAmount: INVALID");
         return historyAmount[_issueIndex][5 - _matchingNumber];
     }
 
@@ -342,57 +351,43 @@ contract Lottery is OwnableUpgradeable {
         uint256 matchingNumber = 0;
         for (uint i = 0; i < lotteryNumbers.length; i++) {
             if (_winningNumbers[i] == lotteryNumbers[i]) {
-                matchingNumber = matchingNumber + 1;
+                matchingNumber= matchingNumber +1;
             }
         }
         uint256 reward = 0;
         if (matchingNumber > 1) {
             uint256 amount = lotteryNFT.getLotteryAmount(_tokenId);
             uint256 poolAmount = getTotalRewards(_issueIndex).mul(allocation[4-matchingNumber]).div(100);
-            reward = amount.mul(1e12).mul(poolAmount).div(getMatchingRewardAmount(_issueIndex, matchingNumber));
+            reward = amount.mul(1e12).div(getMatchingRewardAmount(_issueIndex, matchingNumber)).mul(poolAmount);
         }
         return reward.div(1e12);
     }
 
-    // Safe egg transfer function, just in case if rounding error causes pool to not have enough EGGs.
-    function safeEggTransfer(address _to, uint256 _amount) internal {
-        uint256 eggBal = egg.balanceOf(address(this));
-        if (_amount > eggBal) {
-            egg.transfer(_to, eggBal);
-        } else {
-            egg.transfer(_to, _amount);
-        }
-    }
 
     // Update admin address by the previous dev.
-    function setAdmin(address _adminAddress) external onlyOwner {
-        require(_adminAddress != address(0));
+    function setAdmin(address _adminAddress) public onlyOwner {
         adminAddress = _adminAddress;
-        emit SetAdmin(msg.sender, _adminAddress);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function adminWithdraw(uint256 _amount) external onlyAdmin {
-        egg.safeTransfer(address(msg.sender), _amount);
+    function adminWithdraw(uint256 _amount) public onlyAdmin {
+        like.safeTransfer(address(msg.sender), _amount);
         emit DevWithdraw(msg.sender, _amount);
     }
 
     // Set the minimum price for one ticket
     function setMinPrice(uint256 _price) external onlyAdmin {
         minPrice = _price;
-        emit SetMinPrice(msg.sender, _price);
     }
 
-    // Set the max number to be drawed
+    // Set the minimum price for one ticket
     function setMaxNumber(uint8 _maxNumber) external onlyAdmin {
         maxNumber = _maxNumber;
-        emit SetMaxNumber(msg.sender, _maxNumber);
     }
 
     // Set the allocation for one reward
     function setAllocation(uint8 _allcation1, uint8 _allcation2, uint8 _allcation3) external onlyAdmin {
         allocation = [_allcation1, _allcation2, _allcation3];
-        emit SetAllocation(msg.sender, _allcation1, _allcation2, _allcation3);
     }
 
 }
